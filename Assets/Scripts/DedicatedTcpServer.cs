@@ -539,6 +539,7 @@ public class DedicatedTcpServer : MonoBehaviour
         }
 
         _ = client.SendAsync(FormatListing("listing_joined", listing));
+        _ = SendKnownStatesToClientAsync(client, listing.Id);
         _ = BroadcastAsync(listingMessage, null);
         _ = BroadcastToListingAsync(listing.Id, $"player_joined|{client.Id}|{listing.Id}", client);
 
@@ -597,6 +598,47 @@ public class DedicatedTcpServer : MonoBehaviour
             {
                 RemoveClient(client);
             }
+        }
+    }
+
+    private async Task SendKnownStatesToClientAsync(ClientConnection targetClient, int listingId)
+    {
+        List<ClientConnection> snapshot;
+
+        lock (clientsLock)
+        {
+            snapshot = new List<ClientConnection>(clients);
+        }
+
+        int sentCount = 0;
+
+        foreach (ClientConnection client in snapshot)
+        {
+            if (client == targetClient ||
+                client.ListingId != listingId ||
+                !client.HasAuthoritativeState)
+            {
+                continue;
+            }
+
+            try
+            {
+                await targetClient.SendAsync(FormatStateMessage(
+                    client.Id,
+                    client.AuthoritativePosition,
+                    client.AuthoritativeRotation));
+                sentCount++;
+            }
+            catch
+            {
+                RemoveClient(targetClient);
+                return;
+            }
+        }
+
+        if (sentCount > 0)
+        {
+            Debug.Log($"Sent {sentCount} cached player states to client {targetClient.Id} for listing {listingId}.");
         }
     }
 

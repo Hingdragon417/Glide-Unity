@@ -470,7 +470,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::PlayerMovement
   mouseSensitivity: 0.5
   playerCamera: {fileID: 0}
-  hideLocalBodyFromCamera: 1
+  hideLocalBodyFromCamera: 0
   playerModel: {fileID: 0}
   glideBodyPitch: 90
   glideBankAngle: 25
@@ -493,7 +493,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::NetworkPlayerSync
   tcpClient: {fileID: 0}
   sendRate: 15
-  remotePlayerColor: {r: 0.1, g: 0.7, b: 1, a: 1}
+  fallbackRemotePlayerColor: {r: 1, g: 1, b: 1, a: 1}
 --- !u!65 &6567690697251185065
 BoxCollider:
   m_ObjectHideFlags: 0

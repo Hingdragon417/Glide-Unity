@@ -267,98 +267,127 @@ public class MenuUIController : MonoBehaviour
             return;
         }
 
-        parts[0] = parts[0].Trim().Trim('\uFEFF');
+        string messageType = parts[0].Trim().Trim('\uFEFF');
 
-        if (parts[0] == "welcome")
+        switch (messageType)
         {
-            requestedInitialListings = true;
-            RequestServerListings();
-            _ = CheckServerProtocolAsync();
-            return;
+            case "welcome":
+                HandleWelcomeMessage();
+                break;
+            case "server_protocol":
+                HandleServerProtocolMessage(parts);
+                break;
+            case "listings_begin":
+                HandleListingsBeginMessage();
+                break;
+            case "listing_created":
+            case "listing_joined":
+                HandleLobbyEnteredMessage(parts);
+                break;
+            case "join_failed":
+                HandleJoinFailedMessage(parts);
+                break;
+            case "listing":
+            case "listing_added":
+                HandleListingMessage(parts);
+                break;
+            case "listings_end":
+                HandleListingsEndMessage();
+                break;
+            case "listing_removed":
+                HandleListingRemovedMessage(parts);
+                break;
+            case "join":
+            case "leave":
+            case "state":
+                break;
+            default:
+                Debug.LogWarning($"Unhandled TCP menu message: {message}");
+                break;
         }
+    }
 
-        if (parts[0] == "server_protocol")
+    private void HandleWelcomeMessage()
+    {
+        requestedInitialListings = true;
+        RequestServerListings();
+        _ = CheckServerProtocolAsync();
+    }
+
+    private void HandleServerProtocolMessage(string[] parts)
+    {
+        receivedServerProtocol = parts.Length > 1 && parts[1] == "2";
+    }
+
+    private void HandleListingsBeginMessage()
+    {
+        receivingListingSnapshot = true;
+        pendingServerListings.Clear();
+    }
+
+    private void HandleLobbyEnteredMessage(string[] parts)
+    {
+        waitingForCreateResponse = false;
+
+        if (TryParseListing(parts, out ServerListingInfo listing))
         {
-            receivedServerProtocol = parts.Length > 1 && parts[1] == "2";
-            return;
-        }
-
-        if (parts[0] == "listings_begin")
-        {
-            receivingListingSnapshot = true;
-            pendingServerListings.Clear();
-            return;
-        }
-
-        if (parts[0] == "listing_created" || parts[0] == "listing_joined")
-        {
-            waitingForCreateResponse = false;
-
-            if (TryParseListing(parts, out ServerListingInfo listing))
-            {
-                serverListings[listing.Id] = listing;
-                RebuildServerRows();
-                EnterLobby(listing);
-            }
-
-            return;
-        }
-
-        if (parts[0] == "join_failed")
-        {
-            string reason = parts.Length > 2 ? parts[2] : "unknown";
-            Debug.LogWarning($"Could not join lobby: {reason}.");
-            RequestServerListings();
-            return;
-        }
-
-        if (parts[0] == "listing" || parts[0] == "listing_added")
-        {
-            waitingForCreateResponse = false;
-
-            if (TryParseListing(parts, out ServerListingInfo listing))
-            {
-                if (receivingListingSnapshot)
-                {
-                    pendingServerListings[listing.Id] = listing;
-                    return;
-                }
-
-                serverListings[listing.Id] = listing;
-                RebuildServerRows();
-            }
-
-            return;
-        }
-
-        if (parts[0] == "listings_end")
-        {
-            receivingListingSnapshot = false;
-            waitingForCreateResponse = false;
-
-            serverListings.Clear();
-
-            foreach (KeyValuePair<int, ServerListingInfo> listing in pendingServerListings)
-            {
-                serverListings[listing.Key] = listing.Value;
-            }
-
+            serverListings[listing.Id] = listing;
             RebuildServerRows();
-            pendingServerListings.Clear();
+            EnterLobby(listing);
+        }
+    }
+
+    private void HandleJoinFailedMessage(string[] parts)
+    {
+        string reason = parts.Length > 2 ? parts[2] : "unknown";
+        Debug.LogWarning($"Could not join lobby: {reason}.");
+        RequestServerListings();
+    }
+
+    private void HandleListingMessage(string[] parts)
+    {
+        waitingForCreateResponse = false;
+
+        if (!TryParseListing(parts, out ServerListingInfo listing))
+        {
             return;
         }
 
-        if (parts[0] == "listing_removed" && parts.Length > 1 && int.TryParse(parts[1], out int listingId))
+        if (receivingListingSnapshot)
         {
-            serverListings.Remove(listingId);
-            RebuildServerRows();
+            pendingServerListings[listing.Id] = listing;
             return;
         }
 
-        if (parts[0] != "join" && parts[0] != "leave" && parts[0] != "state")
+        serverListings[listing.Id] = listing;
+        RebuildServerRows();
+    }
+
+    private void HandleListingsEndMessage()
+    {
+        receivingListingSnapshot = false;
+        waitingForCreateResponse = false;
+
+        serverListings.Clear();
+
+        foreach (KeyValuePair<int, ServerListingInfo> listing in pendingServerListings)
         {
-            Debug.LogWarning($"Unhandled TCP menu message: {message}");
+            serverListings[listing.Key] = listing.Value;
         }
+
+        RebuildServerRows();
+        pendingServerListings.Clear();
+    }
+
+    private void HandleListingRemovedMessage(string[] parts)
+    {
+        if (parts.Length <= 1 || !int.TryParse(parts[1], out int listingId))
+        {
+            return;
+        }
+
+        serverListings.Remove(listingId);
+        RebuildServerRows();
     }
 
     private async void JoinLobby(ServerListingInfo listing)
@@ -391,8 +420,27 @@ public class MenuUIController : MonoBehaviour
         }
 
         loadingGameScene = true;
+        HideVisibleMenuUi();
         Debug.Log($"Joined lobby '{listing.Name}' ({listing.CurrentPlayers}/{listing.MaxPlayers}).");
         SceneManager.LoadScene(MainGameSceneName);
+    }
+
+    private void HideVisibleMenuUi()
+    {
+        HideFindServerPanel();
+        HideCreateServerPanel();
+
+        Canvas canvas = GetComponentInParent<Canvas>();
+        if (canvas != null)
+        {
+            canvas.enabled = false;
+
+            GraphicRaycaster raycaster = canvas.GetComponent<GraphicRaycaster>();
+            if (raycaster != null)
+            {
+                raycaster.enabled = false;
+            }
+        }
     }
 
     private bool TryParseListing(string[] parts, out ServerListingInfo listing)

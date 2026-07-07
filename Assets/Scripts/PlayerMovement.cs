@@ -1,19 +1,24 @@
 using System.Collections;
 using System.Collections.Generic;
-using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.InputSystem;
-using UnityEngine.Rendering;
 
 public class PlayerMovement : MonoBehaviour
 {
+    private const string LocalPlayerBodyLayerName = "LocalPlayerBody";
+    private const string WalkControllerResourceName = "PlayerWalk";
+    private static readonly int IsWalkingHash = Animator.StringToHash("IsWalking");
+
     [Header("Movement")]
     public float mouseSensitivity = 0.5f;
     public Transform playerCamera;
-    public bool hideLocalBodyFromCamera = true;
+    public bool hideLocalBodyFromCamera = false;
 
     [Header("Glide Animation")]
     public Transform playerModel;
+    public float modelGroundClearance = 0.02f;
+    [Tooltip("Y is treated as world-space eye height so scaled player model roots do not pull the camera down.")]
+    public Vector3 defaultCameraLocalPosition = new(0f, 1.65f, 0f);
     public float glideBodyPitch = 90f;
     public float glideBankAngle = 25f;
     public float glideAnimSmooth = 8f;
@@ -28,6 +33,10 @@ public class PlayerMovement : MonoBehaviour
     private bool isGrounded;
     private bool isGliding;
     private Coroutine speedBoostCoroutine;
+    private int originalPlayerCameraCullingMask = -1;
+    private bool alignedPlayerModelToCollider;
+    private Animator playerAnimator;
+    private bool animatorHasWalkingParameter;
 
     private void Awake()
     {
@@ -48,7 +57,8 @@ public class PlayerMovement : MonoBehaviour
         Cursor.lockState = CursorLockMode.Locked;
         Cursor.visible = false;
 
-        SetupLocalBodyCameraHider();
+        hideLocalBodyFromCamera = true;
+        ApplyLocalBodyVisibility();
     }
 
     void Update()
@@ -107,8 +117,12 @@ public class PlayerMovement : MonoBehaviour
             }
         }
 
+        AttachCameraToPlayerRoot();
+
         if (playerModel != null)
         {
+            AlignPlayerModelToCollider();
+            ResolvePlayerAnimator();
             return;
         }
 
@@ -116,6 +130,16 @@ public class PlayerMovement : MonoBehaviour
         if (existingModelRoot != null)
         {
             playerModel = existingModelRoot;
+            ResolvePlayerAnimator();
+            return;
+        }
+
+        Transform animatedModelRoot = GetAnimatedModelRoot();
+        if (animatedModelRoot != null)
+        {
+            playerModel = animatedModelRoot;
+            AlignPlayerModelToCollider();
+            ResolvePlayerAnimator();
             return;
         }
 
@@ -153,113 +177,263 @@ public class PlayerMovement : MonoBehaviour
         }
 
         playerModel = modelTransform;
+        AlignPlayerModelToCollider();
+        ResolvePlayerAnimator();
     }
 
-    private void SetupLocalBodyCameraHider()
+    private Transform GetAnimatedModelRoot()
     {
-        if (!hideLocalBodyFromCamera || playerCamera == null)
+        if (GetComponent<Animator>() == null)
+        {
+            return null;
+        }
+
+        Transform object2 = transform.Find("Object_2");
+        if (object2 != null && object2.GetComponentInChildren<Renderer>(true) != null)
+        {
+            return object2;
+        }
+
+        foreach (Transform child in transform)
+        {
+            if (child == playerCamera || child.GetComponent<Camera>() != null)
+            {
+                continue;
+            }
+
+            if (child.GetComponentInChildren<Renderer>(true) != null)
+            {
+                return child;
+            }
+        }
+
+        return null;
+    }
+
+    private void AttachCameraToPlayerRoot()
+    {
+        if (playerCamera == null)
         {
             return;
         }
 
-        if (playerModel == null)
+        bool movedParent = playerCamera.parent != transform;
+        if (movedParent)
         {
-            ResolveSetupReferences();
+            playerCamera.SetParent(transform, false);
         }
 
-        Camera cameraComponent = playerCamera.GetComponent<Camera>();
+        playerCamera.localPosition = GetCameraLocalPositionForWorldHeight();
+
+        if (movedParent)
+        {
+            playerCamera.localRotation = Quaternion.identity;
+        }
+
+        playerCamera.localScale = Vector3.one;
+    }
+
+    private Vector3 GetCameraLocalPositionForWorldHeight()
+    {
+        Vector3 localPosition = defaultCameraLocalPosition;
+        float rootScaleY = Mathf.Abs(transform.lossyScale.y);
+
+        if (rootScaleY > 0.0001f)
+        {
+            localPosition.y = defaultCameraLocalPosition.y / rootScaleY;
+        }
+
+        return localPosition;
+    }
+
+    private void AlignPlayerModelToCollider()
+    {
+        if (alignedPlayerModelToCollider || playerModel == null)
+        {
+            return;
+        }
+
+        Renderer[] renderers = playerModel.GetComponentsInChildren<Renderer>(true);
+        if (renderers.Length == 0)
+        {
+            return;
+        }
+
+        bool hasBounds = false;
+        Bounds visualBounds = default;
+
+        foreach (Renderer renderer in renderers)
+        {
+            if (playerCamera != null && renderer.transform.IsChildOf(playerCamera))
+            {
+                continue;
+            }
+
+            if (!hasBounds)
+            {
+                visualBounds = renderer.bounds;
+                hasBounds = true;
+            }
+            else
+            {
+                visualBounds.Encapsulate(renderer.bounds);
+            }
+        }
+
+        if (!hasBounds)
+        {
+            return;
+        }
+
+        float targetBottomY = GetColliderBottomY() + modelGroundClearance;
+        float liftAmount = targetBottomY - visualBounds.min.y;
+
+        if (Mathf.Abs(liftAmount) > 0.001f)
+        {
+            playerModel.position += Vector3.up * liftAmount;
+        }
+
+        alignedPlayerModelToCollider = true;
+    }
+
+    private float GetColliderBottomY()
+    {
+        Collider[] colliders = GetComponents<Collider>();
+        float bottomY = transform.position.y;
+        bool foundSolidCollider = false;
+
+        foreach (Collider collider in colliders)
+        {
+            if (collider == null || !collider.enabled || collider.isTrigger)
+            {
+                continue;
+            }
+
+            if (!foundSolidCollider)
+            {
+                bottomY = collider.bounds.min.y;
+                foundSolidCollider = true;
+            }
+            else
+            {
+                bottomY = Mathf.Min(bottomY, collider.bounds.min.y);
+            }
+        }
+
+        return bottomY;
+    }
+
+    private void ResolvePlayerAnimator()
+    {
+        if (playerModel == null)
+        {
+            return;
+        }
+
+        if (playerAnimator == null)
+        {
+            playerAnimator = GetComponent<Animator>();
+        }
+
+        if (playerAnimator == null)
+        {
+            playerAnimator = playerModel.GetComponent<Animator>();
+        }
+
+        if (playerAnimator == null)
+        {
+            playerAnimator = playerModel.gameObject.AddComponent<Animator>();
+        }
+
+        if (playerAnimator.runtimeAnimatorController == null)
+        {
+            playerAnimator.runtimeAnimatorController = Resources.Load<RuntimeAnimatorController>(WalkControllerResourceName);
+        }
+
+        playerAnimator.applyRootMotion = false;
+        playerAnimator.cullingMode = AnimatorCullingMode.AlwaysAnimate;
+        animatorHasWalkingParameter = HasAnimatorParameter(playerAnimator, IsWalkingHash, AnimatorControllerParameterType.Bool);
+    }
+
+    private void SetWalkingAnimation(bool isWalkingNow)
+    {
+        if (playerAnimator == null)
+        {
+            ResolvePlayerAnimator();
+        }
+
+        if (playerAnimator != null && animatorHasWalkingParameter)
+        {
+            playerAnimator.SetBool(IsWalkingHash, isWalkingNow);
+        }
+    }
+
+    private static bool HasAnimatorParameter(Animator animator, int parameterHash, AnimatorControllerParameterType parameterType)
+    {
+        if (animator == null || animator.runtimeAnimatorController == null)
+        {
+            return false;
+        }
+
+        foreach (AnimatorControllerParameter parameter in animator.parameters)
+        {
+            if (parameter.nameHash == parameterHash && parameter.type == parameterType)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void ApplyLocalBodyVisibility()
+    {
+        Camera cameraComponent = playerCamera != null ? playerCamera.GetComponent<Camera>() : null;
         if (cameraComponent == null)
         {
             return;
         }
 
-        List<Renderer> bodyRenderers = new();
-        Transform renderRoot = playerModel != null ? playerModel : transform;
-
-        foreach (Renderer bodyRenderer in renderRoot.GetComponentsInChildren<Renderer>(true))
+        int localBodyLayer = LayerMask.NameToLayer(LocalPlayerBodyLayerName);
+        if (localBodyLayer < 0)
         {
-            if (bodyRenderer.transform.IsChildOf(playerCamera))
+            Debug.LogWarning($"Layer '{LocalPlayerBodyLayerName}' is missing. Local body will stay visible.");
+            return;
+        }
+
+        if (originalPlayerCameraCullingMask < 0)
+        {
+            originalPlayerCameraCullingMask = cameraComponent.cullingMask;
+        }
+
+        Transform rendererRoot = playerModel != null ? playerModel : transform;
+        foreach (Renderer renderer in rendererRoot.GetComponentsInChildren<Renderer>(true))
+        {
+            if (playerCamera != null && renderer.transform.IsChildOf(playerCamera))
             {
                 continue;
             }
 
-            bodyRenderers.Add(bodyRenderer);
+#if !UNITY_EDITOR
+            renderer.enabled = !hideLocalBodyFromCamera;
+#else
+            renderer.enabled = true;
+            SetLayerRecursively(renderer.transform, localBodyLayer);
+#endif
         }
 
-        LocalCameraBodyHider bodyHider = cameraComponent.GetComponent<LocalCameraBodyHider>();
-        if (bodyHider == null)
-        {
-            bodyHider = cameraComponent.gameObject.AddComponent<LocalCameraBodyHider>();
-        }
-
-        bodyHider.SetRenderers(bodyRenderers);
+#if UNITY_EDITOR
+        cameraComponent.cullingMask = hideLocalBodyFromCamera
+            ? originalPlayerCameraCullingMask & ~(1 << localBodyLayer)
+            : originalPlayerCameraCullingMask;
+#endif
     }
 
-    private sealed class LocalCameraBodyHider : MonoBehaviour
+    private static void SetLayerRecursively(Transform root, int layer)
     {
-        private readonly List<Renderer> bodyRenderers = new();
-        private Camera targetCamera;
-
-        private void Awake()
+        foreach (Transform child in root.GetComponentsInChildren<Transform>(true))
         {
-            targetCamera = GetComponent<Camera>();
-        }
-
-        private void OnEnable()
-        {
-            RenderPipelineManager.beginCameraRendering += HandleBeginCameraRendering;
-            RenderPipelineManager.endCameraRendering += HandleEndCameraRendering;
-        }
-
-        public void SetRenderers(List<Renderer> renderers)
-        {
-            targetCamera = GetComponent<Camera>();
-            bodyRenderers.Clear();
-            bodyRenderers.AddRange(renderers);
-            RestoreBodyRenderers();
-        }
-
-        private void HandleBeginCameraRendering(ScriptableRenderContext context, Camera renderingCamera)
-        {
-            if (renderingCamera != targetCamera)
-            {
-                return;
-            }
-
-            SetBodyRenderersVisible(false);
-        }
-
-        private void HandleEndCameraRendering(ScriptableRenderContext context, Camera renderingCamera)
-        {
-            if (renderingCamera != targetCamera)
-            {
-                return;
-            }
-
-            RestoreBodyRenderers();
-        }
-
-        private void OnDisable()
-        {
-            RenderPipelineManager.beginCameraRendering -= HandleBeginCameraRendering;
-            RenderPipelineManager.endCameraRendering -= HandleEndCameraRendering;
-            RestoreBodyRenderers();
-        }
-
-        private void RestoreBodyRenderers()
-        {
-            SetBodyRenderersVisible(true);
-        }
-
-        private void SetBodyRenderersVisible(bool visible)
-        {
-            foreach (Renderer bodyRenderer in bodyRenderers)
-            {
-                if (bodyRenderer != null)
-                {
-                    bodyRenderer.enabled = visible;
-                }
-            }
+            child.gameObject.layer = layer;
         }
     }
 
@@ -267,6 +441,7 @@ public class PlayerMovement : MonoBehaviour
     {
         if (isGliding)
         {
+            SetWalkingAnimation(false);
             Glide();
             return;
         }
@@ -277,6 +452,7 @@ public class PlayerMovement : MonoBehaviour
 
         Vector3 movement = transform.right * x + transform.forward * z;
         movement = Vector3.ClampMagnitude(movement, 1f);
+        SetWalkingAnimation(isGrounded && movement.sqrMagnitude > 0.01f);
 
         Vector3 velocity = movement * (GameplayRules.WalkSpeed * currentSpeedMultiplier);
         float verticalVelocity = rb.linearVelocity.y;

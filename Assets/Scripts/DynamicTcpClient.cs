@@ -25,12 +25,22 @@ public class DynamicTcpClient : MonoBehaviour
     private CancellationTokenSource cancellation;
     private Task connectTask;
     private readonly ConcurrentQueue<string> receivedMessages = new();
+    private readonly ConcurrentDictionary<int, string> latestStateMessages = new();
     private readonly StringBuilder receiveBuffer = new();
 
     public bool IsConnected => client != null && client.Connected;
     public string Host => host;
     public int Port => port;
+    public int LocalPlayerId { get; private set; } = -1;
+    public static DynamicTcpClient ActiveClient => activeClient;
     public event Action<string> MessageReceived;
+
+    public string[] GetCachedStateMessages()
+    {
+        string[] snapshot = new string[latestStateMessages.Count];
+        latestStateMessages.Values.CopyTo(snapshot, 0);
+        return snapshot;
+    }
 
     private void Awake()
     {
@@ -41,6 +51,7 @@ public class DynamicTcpClient : MonoBehaviour
         }
 
         activeClient = this;
+        transform.SetParent(null);
         DontDestroyOnLoad(gameObject);
     }
 
@@ -135,7 +146,33 @@ public class DynamicTcpClient : MonoBehaviour
     {
         while (receivedMessages.TryDequeue(out string message))
         {
-            MessageReceived?.Invoke(message);
+            CacheConnectionState(message);
+            DispatchMessage(message);
+        }
+    }
+
+    // Invoke each subscriber independently so that one throwing handler (for example a
+    // stale menu controller that lingers after the scene change) cannot abort the multicast
+    // and starve later subscribers such as NetworkPlayerSync.
+    private void DispatchMessage(string message)
+    {
+        Action<string> handlers = MessageReceived;
+
+        if (handlers == null)
+        {
+            return;
+        }
+
+        foreach (Delegate handler in handlers.GetInvocationList())
+        {
+            try
+            {
+                ((Action<string>)handler).Invoke(message);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogError($"TCP message handler error: {exception.Message}");
+            }
         }
     }
 
@@ -218,6 +255,9 @@ public class DynamicTcpClient : MonoBehaviour
 
     public void Disconnect()
     {
+        LocalPlayerId = -1;
+        latestStateMessages.Clear();
+
         cancellation?.Cancel();
         cancellation?.Dispose();
         cancellation = null;
@@ -282,6 +322,28 @@ public class DynamicTcpClient : MonoBehaviour
             {
                 receivedMessages.Enqueue(message);
             }
+        }
+    }
+
+    private void CacheConnectionState(string message)
+    {
+        string[] parts = message.Split('|');
+
+        if (parts.Length == 2 && parts[0].Trim().Trim('\uFEFF') == "welcome" && int.TryParse(parts[1], out int playerId))
+        {
+            LocalPlayerId = playerId;
+            return;
+        }
+
+        if (parts.Length == 9 && parts[0] == "state" && int.TryParse(parts[1], out int statePlayerId))
+        {
+            latestStateMessages[statePlayerId] = message;
+            return;
+        }
+
+        if (parts.Length == 2 && parts[0] == "leave" && int.TryParse(parts[1], out int leavingPlayerId))
+        {
+            latestStateMessages.TryRemove(leavingPlayerId, out _);
         }
     }
 
