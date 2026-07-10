@@ -12,6 +12,7 @@ using UnityEngine;
 // ATOMIC DEPLOY CHECK: lobby server bundle 2026-06-29 protocol v2.
 public class DedicatedTcpServer : MonoBehaviour
 {
+    private const string ServerObjectName = "Dedicated Server";
     private static readonly UTF8Encoding Utf8NoBom = new(false);
     private static readonly Dictionary<int, ServerListing> listingTable = new();
     private static readonly object listingTableLock = new();
@@ -34,6 +35,25 @@ public class DedicatedTcpServer : MonoBehaviour
 
     public int Port => port;
     public bool IsRunning => listener != null;
+
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
+    private static void EnsureHeadlessServerExists()
+    {
+        if (!Application.isBatchMode && SystemInfo.graphicsDeviceType != UnityEngine.Rendering.GraphicsDeviceType.Null)
+        {
+            return;
+        }
+
+        if (FindAnyObjectByType<DedicatedTcpServer>() != null)
+        {
+            return;
+        }
+
+        GameObject serverObject = new(ServerObjectName);
+        DontDestroyOnLoad(serverObject);
+        serverObject.AddComponent<DedicatedTcpServer>();
+        Debug.Log("Created dedicated TCP server bootstrap object.");
+    }
 
     private async void Awake()
     {
