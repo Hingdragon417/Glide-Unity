@@ -302,6 +302,7 @@ public class NetworkPlayerSync : MonoBehaviour
 
         StripLocalOnlyComponents(remotePlayer);
         ResetLayers(remotePlayer, LayerMask.NameToLayer("Default"));
+        ApplyRemotePlayerMaterial(remotePlayer);
         EnableRemoteRenderers(remotePlayer);
         AlignRemoteVisualToLocalCollider(remotePlayer);
         EnsureRemoteAnimator(remotePlayer);
@@ -480,6 +481,29 @@ public class NetworkPlayerSync : MonoBehaviour
         else
         {
             Debug.Log($"[NetSync] Remote player '{remotePlayer.name}' renderers enabled: {enabledRendererCount}.");
+        }
+    }
+
+    private void ApplyRemotePlayerMaterial(GameObject remotePlayer)
+    {
+        Material material = GetRemotePlayerMaterial();
+
+        foreach (Renderer renderer in remotePlayer.GetComponentsInChildren<Renderer>(true))
+        {
+            Material[] sharedMaterials = renderer.sharedMaterials;
+
+            if (sharedMaterials == null || sharedMaterials.Length == 0)
+            {
+                renderer.sharedMaterial = material;
+                continue;
+            }
+
+            for (int i = 0; i < sharedMaterials.Length; i++)
+            {
+                sharedMaterials[i] = material;
+            }
+
+            renderer.sharedMaterials = sharedMaterials;
         }
     }
 
